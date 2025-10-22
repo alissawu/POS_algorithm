@@ -1,55 +1,165 @@
 # aw5571_viterbi_unk_HW3.py
-# Viterbi that uses the hapax-based UNK emissions
+# Viterbi + small decode-time bonuses + interpolated transitions
+# Targeted at: NN↔JJ/NNP, NNPS→NNP, IN↔RB/RP, VBD/VBN/VBG, and "that".
 
-import sys
-from aw5571_probs_unk_HW3 import make_log_prob_tables_hapax, emit_logprob_with_unk
+import sys, re
+from aw5571_probs_unk_HW3 import (
+    make_log_prob_tables_hapax,
+    emit_logprob_with_unk,
+    interp_log_transition,
+)
 from aw5571_train_HMM_HW3 import BEGIN, END
 
-def viterbi_tag_sentence(words, tags, logA, logB):
-    inner = [t for t in tags if t not in (BEGIN, END)]
-    if not words: return []
+# Punctuation mapping consistent with PTB
+PUNCT_TAG = {",": ",", ".": ".", "``": "``", "''": "''", ":": ":", "(": "(", ")": ")"}
 
-    V = [{} for _ in range(len(words))]
+_is_num  = re.compile(r'.*\d.*').match
+_acronym = re.compile(r'^(?:[A-Z]\.){2,}$').match     # e.g., U.S., U.K.
+_initcap = re.compile(r'^[A-Z][a-z].*').match
+
+# Small closed-class word sets for gentle nudges (allowed by HW)
+PARTICLES = {"up","down","out","off","back","in","over","away","through","around"}
+CLOSED_IN = {"as"}  # very often IN in WSJ
+
+HAVE_WORDS = {"have","has","had","having"}
+BE_WORDS   = {"be","am","is","are","was","were","been","being"}
+
+def emission_with_bonuses(logB, tag, word, seen_tags, pos_in_sent):
+    base = emit_logprob_with_unk(logB, tag, word)
+
+    # 1) punctuation
+    if word in PUNCT_TAG and tag == PUNCT_TAG[word]:
+        return base + 5.0
+    if word in (";","--") and tag == ":":
+        base += 2.5
+
+    # 2) numbers -> CD
+    if _is_num(word) and tag == "CD":
+        base += 3.0
+
+    # 3) tag dictionary bias (from training) + small negative for unseen tags
+    tags_seen = seen_tags.get(word)
+    if tags_seen:
+        if len(tags_seen) == 1 and tag in tags_seen:
+            base += 2.0
+        elif len(tags_seen) == 2 and tag in tags_seen:
+            base += 0.5
+        if tag not in tags_seen:
+            base -= 1.0
+
+    # 4) NNPS vs NNP: mid-sentence InitCap + endswith 's' (not 's) -> NNPS
+    if pos_in_sent > 0 and word.endswith("s") and not word.endswith("'s"):
+        if _initcap(word) and tag == "NNPS":
+            base += 3.0  # slightly stronger
+
+    # 5) 'as' is almost always IN in WSJ
+    if word.lower() in CLOSED_IN and tag == "IN":
+        base += 2.0
+
+    # 6) acronyms & mid-sentence proper names -> NNP
+    if _acronym(word) and tag == "NNP":
+        base += 3.0
+    if pos_in_sent > 0 and _initcap(word) and tag == "NNP":
+        base += 1.2
+
+    # 7) tiny morphology nudges for common JJ/RB/NNS cues (kept very small)
+    wl = word.lower()
+    if wl.endswith("ly") and tag == "RB":
+        base += 1.0
+
+    return base
+
+def ctx_bonus(prev_tag, cur_tag, prev_word=None, cur_word=None):
+    b = 0.0
+
+    # After TO or a modal, prefer base-form verb
+    if prev_tag in ("TO", "MD") and cur_tag == "VB":
+        b += 0.8
+
+    # Verb-particle constructions: after a verb/aux, if token is a common particle -> RP
+    if prev_tag.startswith("VB") or prev_tag in ("MD","VBD","VBP","VBZ","VBN","VBG"):
+        if cur_word and cur_word.lower() in PARTICLES and cur_tag == "RP":
+            b += 1.5  # a bit stronger
+
+    # Perfect/progressive nudges
+    if prev_word and prev_word.lower() in HAVE_WORDS and cur_tag == "VBN":
+        b += 1.0
+    if prev_word and prev_word.lower() in BE_WORDS and cur_tag == "VBG":
+        b += 1.0
+    # fallback when only tags are available
+    if prev_tag in ("VBD","VBP","VBZ") and cur_tag == "VBN":
+        b += 0.6
+    if prev_tag in ("VBD","VBP","VBZ") and cur_tag == "VBG":
+        b += 0.6
+
+    # Default bias for particle words when NOT after a verb: they’re usually IN
+    if cur_word and cur_word.lower() in PARTICLES and cur_tag == "IN":
+        if not (prev_tag.startswith("VB") or prev_tag in ("MD","VBD","VBP","VBZ","VBN","VBG")):
+            b += 0.4
+
+    # Special handling for "that": IN after verbs (complementizer), WDT after nouns/',' (relative)
+    if cur_word and cur_word.lower() == "that":
+        if prev_tag in ("VBD","VBP","VBZ","VB","MD"):  # said/think/etc. that ...
+            if cur_tag == "IN":
+                b += 1.0
+        if prev_tag in ("NN","NNS","NNP",","):        # the plan that ... / , that ...
+            if cur_tag == "WDT":
+                b += 1.0
+
+    return b
+
+def viterbi_tag_sentence(words, tags, logA, logB, seen_tags, tag_priors, lam=0.9):
+    inner = [t for t in tags if t not in (BEGIN, END)]
+    if not words:
+        return []
+
+    V  = [{} for _ in range(len(words))]
     BP = [{} for _ in range(len(words))]
 
-    # init
+    # init (BEGIN -> t) + emission
     w0 = words[0]
     for t in inner:
-        V[0][t] = logA[BEGIN][t] + emit_logprob_with_unk(logB, t, w0)
+        trans = interp_log_transition(BEGIN, t, logA, tag_priors, lam)
+        V[0][t] = trans + emission_with_bonuses(logB, t, w0, seen_tags, pos_in_sent=0)
         BP[0][t] = BEGIN
 
     # forward
     for i in range(1, len(words)):
         w = words[i]
+        pw = words[i-1] if i > 0 else None
         for t in inner:
             best_s, best_p = -1e18, None
-            e = emit_logprob_with_unk(logB, t, w)
+            e = emission_with_bonuses(logB, t, w, seen_tags, pos_in_sent=i)
             for p in inner:
                 prev = V[i-1].get(p)
-                if prev is None: continue
-                s = prev + logA[p][t] + e
+                if prev is None:
+                    continue
+                trans = interp_log_transition(p, t, logA, tag_priors, lam)
+                s = prev + trans + e + ctx_bonus(p, t, prev_word=pw, cur_word=w)
                 if s > best_s:
                     best_s, best_p = s, p
             V[i][t] = best_s
             BP[i][t] = best_p
 
-    # end
+    # end (t -> END)
     best_last, best_s = None, -1e18
     for t in inner:
-        s = V[-1].get(t, -1e18) + logA[t][END]
+        s = V[-1].get(t, -1e18) + interp_log_transition(t, END, logA, tag_priors, lam)
         if s > best_s:
             best_s, best_last = s, t
 
     # backtrack
-    seq = [None]*len(words)
+    seq = [None] * len(words)
     seq[-1] = best_last if best_last is not None else inner[0]
-    for i in range(len(words)-1, 0, -1):
+    for i in range(len(words) - 1, 0, -1):
         prev = BP[i][seq[i]]
         seq[i-1] = prev if prev is not None else inner[0]
     return seq
 
 def tag_file(train_pos_path, in_words_path, out_pos_path):
-    tags, logA, logB, _ = make_log_prob_tables_hapax(train_pos_path, k_trans=0.1, k_emit=0.1)
+    tags, logA, logB, _, seen_tags, tag_priors = make_log_prob_tables_hapax(
+        train_pos_path, k_trans=0.1, k_emit=0.1
+    )
     with open(in_words_path, "r", encoding="utf-8") as fin, \
          open(out_pos_path, "w", encoding="utf-8") as fout:
         sent = []
@@ -57,7 +167,7 @@ def tag_file(train_pos_path, in_words_path, out_pos_path):
             line = raw.rstrip("\n")
             if line == "":
                 if sent:
-                    seq = viterbi_tag_sentence(sent, tags, logA, logB)
+                    seq = viterbi_tag_sentence(sent, tags, logA, logB, seen_tags, tag_priors, lam=0.9)
                     for w, t in zip(sent, seq):
                         fout.write(f"{w}\t{t}\n")
                     fout.write("\n")
@@ -67,7 +177,7 @@ def tag_file(train_pos_path, in_words_path, out_pos_path):
                 continue
             sent.append(line)
         if sent:
-            seq = viterbi_tag_sentence(sent, tags, logA, logB)
+            seq = viterbi_tag_sentence(sent, tags, logA, logB, seen_tags, tag_priors, lam=0.9)
             for w, t in zip(sent, seq):
                 fout.write(f"{w}\t{t}\n")
             fout.write("\n")
