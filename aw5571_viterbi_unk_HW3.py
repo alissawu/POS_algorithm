@@ -27,17 +27,17 @@ BE_WORDS   = {"be","am","is","are","was","were","been","being"}
 def emission_with_bonuses(logB, tag, word, seen_tags, pos_in_sent):
     base = emit_logprob_with_unk(logB, tag, word)
 
-    # 1) punctuation
+    # punctuation (deterministic)
     if word in PUNCT_TAG and tag == PUNCT_TAG[word]:
         return base + 5.0
     if word in (";","--") and tag == ":":
         base += 2.5
 
-    # 2) numbers -> CD
+    # numbers -> CD
     if _is_num(word) and tag == "CD":
         base += 3.0
 
-    # 3) tag dictionary bias (from training) + small negative for unseen tags
+    # tag dictionary bias (from training) + small negative for unseen tags
     tags_seen = seen_tags.get(word)
     if tags_seen:
         if len(tags_seen) == 1 and tag in tags_seen:
@@ -47,66 +47,85 @@ def emission_with_bonuses(logB, tag, word, seen_tags, pos_in_sent):
         if tag not in tags_seen:
             base -= 1.0
 
-    # 4) NNPS vs NNP: mid-sentence InitCap + endswith 's' (not 's) -> NNPS
+    # sentence-initial: be careful with NNP (reduce BEGIN→NN→NNP errors)
+    if pos_in_sent == 0 and tag == "NNP" and not _acronym(word):
+        # only penalize if the word isn't uniquely NNP in training
+        tags_seen = tags_seen or set()
+        if not (len(tags_seen) == 1 and "NNP" in tags_seen):
+            base -= 0.6
+
+    # NNPS vs NNP: mid-sentence InitCap + endswith 's' (not "'s") -> NNPS
     if pos_in_sent > 0 and word.endswith("s") and not word.endswith("'s"):
         if _initcap(word) and tag == "NNPS":
-            base += 3.0  # slightly stronger
+            base += 3.0
 
-    # 5) 'as' is almost always IN in WSJ
-    if word.lower() in CLOSED_IN and tag == "IN":
+    # 'as' is almost always IN in WSJ
+    if word.lower() == "as" and tag == "IN":
         base += 2.0
 
-    # 6) acronyms & mid-sentence proper names -> NNP
+    # acronyms & mid-sentence proper names -> NNP
     if _acronym(word) and tag == "NNP":
         base += 3.0
     if pos_in_sent > 0 and _initcap(word) and tag == "NNP":
         base += 1.2
 
-    # 7) tiny morphology nudges for common JJ/RB/NNS cues (kept very small)
-    wl = word.lower()
-    if wl.endswith("ly") and tag == "RB":
+    # -ly adverbs (tiny)
+    if word.lower().endswith("ly") and tag == "RB":
         base += 1.0
 
     return base
 
+
 def ctx_bonus(prev_tag, cur_tag, prev_word=None, cur_word=None):
     b = 0.0
+    w = (cur_word or "").lower()
+    pw = (prev_word or "").lower()
 
     # After TO or a modal, prefer base-form verb
     if prev_tag in ("TO", "MD") and cur_tag == "VB":
         b += 0.8
 
-    # Verb-particle constructions: after a verb/aux, if token is a common particle -> RP
+    # Verb-particle: after a verb/aux, particle words -> RP (slightly reduced)
     if prev_tag.startswith("VB") or prev_tag in ("MD","VBD","VBP","VBZ","VBN","VBG"):
-        if cur_word and cur_word.lower() in PARTICLES and cur_tag == "RP":
-            b += 1.5  # a bit stronger
+        if w in PARTICLES and cur_tag == "RP":
+            b += 1.2   # was 1.5
+
+    # If not after a verb, particle words are usually IN (comma cases, etc.)
+    if w in PARTICLES and cur_tag == "IN":
+        if not (prev_tag.startswith("VB") or prev_tag in ("MD","VBD","VBP","VBZ","VBN","VBG")):
+            b += 0.8
+
+    # Comma + particle specifically favors IN (handles ", down", ", up")
+    if prev_word == "," and w in PARTICLES and cur_tag == "IN":
+        b += 1.0
 
     # Perfect/progressive nudges
-    if prev_word and prev_word.lower() in HAVE_WORDS and cur_tag == "VBN":
+    if pw in {"have","has","had","having"} and cur_tag == "VBN":
         b += 1.0
-    if prev_word and prev_word.lower() in BE_WORDS and cur_tag == "VBG":
+    if pw in {"be","am","is","are","was","were","been","being"} and cur_tag == "VBG":
         b += 1.0
-    # fallback when only tags are available
+    # tag-only fallback
     if prev_tag in ("VBD","VBP","VBZ") and cur_tag == "VBN":
         b += 0.6
     if prev_tag in ("VBD","VBP","VBZ") and cur_tag == "VBG":
         b += 0.6
 
-    # Default bias for particle words when NOT after a verb: they’re usually IN
-    if cur_word and cur_word.lower() in PARTICLES and cur_tag == "IN":
-        if not (prev_tag.startswith("VB") or prev_tag in ("MD","VBD","VBP","VBZ","VBN","VBG")):
+    # After adverb, past tense VBD > VBN a bit (fix RB→VBD→VBN)
+    if prev_tag == "RB":
+        if cur_tag == "VBD":
             b += 0.4
+        elif cur_tag == "VBN":
+            b -= 0.3
 
-    # Special handling for "that": IN after verbs (complementizer), WDT after nouns/',' (relative)
-    if cur_word and cur_word.lower() == "that":
-        if prev_tag in ("VBD","VBP","VBZ","VB","MD"):  # said/think/etc. that ...
-            if cur_tag == "IN":
-                b += 1.0
-        if prev_tag in ("NN","NNS","NNP",","):        # the plan that ... / , that ...
-            if cur_tag == "WDT":
-                b += 1.0
+    # "that": IN after verbs (complementizer), WDT after nouns/',' (relative)
+    if w == "that":
+        if prev_tag in ("VBD","VBP","VBZ","VB","MD") and cur_tag == "IN":
+            b += 1.0
+        if prev_tag in ("NN","NNS","NNP",",") and cur_tag == "WDT":
+            b += 1.0
 
     return b
+
 
 def viterbi_tag_sentence(words, tags, logA, logB, seen_tags, tag_priors, lam=0.9):
     inner = [t for t in tags if t not in (BEGIN, END)]
