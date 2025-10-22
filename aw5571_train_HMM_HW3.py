@@ -1,7 +1,6 @@
 # aw5571_train_HMM_HW3.py
-# Counts: emissions P(word|tag) and transitions P(tag_i | tag_{i-1})
+# emissions P(word|tag), transitions P(tag_i | tag_{i-1})
 # BEGIN/END are synthetic tags used only for transitions.
-# Optional: if a DEV .words file is provided, print OOV coverage diagnostics.
 
 import sys
 import collections
