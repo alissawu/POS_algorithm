@@ -18,8 +18,8 @@ CLASS_ALPHA = 0.5
 CLASS_BACKOFF = 5.0
 LOW_FREQ_BLEND_THRESHOLD = 2
 LOW_FREQ_BLEND_WEIGHT = 0.7
-TRIGRAM_BACKOFF = 3.0
-BIGRAM_BACKOFF = 1.5
+TRIGRAM_BACKOFF = 2.0 # from 3 to 2, improve by 0.02%
+BIGRAM_BACKOFF = 1.0
 
 SUFFIX_CLASSES = [
     "less",
@@ -543,17 +543,23 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str, idx: int, wor
         elif curr == "IN" and particle_candidate:
             bonus += math.log(0.8)
     if prev in DETERMINER_TAGS:
-        if curr == "NN" and not is_adjective_like(word):
-            bonus += math.log(1.1)
-        if curr == "JJ" and not is_adjective_like(word):
-            bonus += math.log(0.85)
-        if curr == "JJ" and is_adjective_like(word):
-            bonus += math.log(1.1)
+        # Even stronger preference for NN after determiners
+        if curr == "NN":
+            if is_adjective_like(word):
+                bonus += math.log(1.0)  # Neutral if adjective-like
+            else:
+                bonus += math.log(1.35)  # Even stronger boost for non-adjective nouns
+        elif curr == "JJ":
+            if is_adjective_like(word):
+                bonus += math.log(1.1)  # Slight boost for adjective-like words
+            else:
+                bonus += math.log(0.65)  # Much stronger penalty for non-adjective words
         if lower.endswith("ed"):
+            # After determiners, -ed words are often VBN used attributively, not JJ
             if curr == "VBN":
-                bonus += math.log(1.15)
+                bonus += math.log(1.3)  # Stronger boost
             elif curr == "JJ":
-                bonus += math.log(0.9)
+                bonus += math.log(0.75)  # Stronger penalty
         if "-" in lower and curr in {"NN", "NNS"}:
             bonus += math.log(1.1)
     if prev in CAPITAL_TAGS and curr in CAPITAL_TAGS:
@@ -588,26 +594,19 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str, idx: int, wor
         elif curr == "IN":
             bonus += math.log(0.85)
     if lower.endswith("ed"):
-        # VBN typically follows auxiliary verbs (VBZ=has/is, VBP=have/are, VBD=had/was/were)
-        if prev in {"VBZ", "VBP"}:  # Present auxiliary verbs (has, have, is, are)
-            if curr == "VBN":
-                bonus += math.log(1.6)  # Strong boost for VBN
-            elif curr == "VBD":
-                bonus += math.log(0.5)  # Strong penalty for VBD
-        elif prev == "VBD":  # Past auxiliary (had, was, were) - could be either VBN or VBD
-            if curr == "VBN":
-                bonus += math.log(1.3)  # Moderate boost for VBN
-            elif curr == "VBD":
-                bonus += math.log(0.85)  # Small penalty for VBD
-        elif prev in {"VB", "MD"}:  # After modal or base verb
+        # Simplified: focus on what works
+        if prev in {"VB", "VBP", "VBZ", "MD", "VBD"}:
             if curr == "VBN":
                 bonus += math.log(1.3)
             elif curr == "VBD":
                 bonus += math.log(0.85)
         if prev in {"NN", "NNS", "PRP", "PRP$"}:
+            # After subjects, -ed words are usually past tense VBD, not VBN
             if curr == "VBD":
-                bonus += math.log(1.2)
-            elif curr in {"VBN", "JJ"}:
+                bonus += math.log(1.35)  # Stronger boost for past tense
+            elif curr == "VBN":
+                bonus += math.log(0.7)  # Stronger penalty for past participle
+            elif curr == "JJ":
                 bonus += math.log(0.85)
         if prev in DETERMINER_TAGS:
             if curr == "JJ":
