@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -13,15 +14,13 @@ Sentence = List[Tuple[str, str]]
 TokenSequence = List[str]
 START_TAG = "<s>"
 END_TAG = "</s>"
-TRANSITION_ALPHA = 0.05
+TRANSITION_ALPHA = 0.1
 CLASS_ALPHA = 0.5
 CLASS_BACKOFF = 5.0
 LOW_FREQ_BLEND_THRESHOLD = 2
 LOW_FREQ_BLEND_WEIGHT = 0.7
 TRIGRAM_BACKOFF = 2.0 # from 3 to 2, improve by 0.02%
 BIGRAM_BACKOFF = 1.0
-OOV_CONTEXT_MIX = 0.01  # small mix with prev-tag dist for OOV
-OOV_CONTEXT_BACKOFF = 50.0  # scale by prev-tag count/(count+backoff)
 
 SUFFIX_CLASSES = [
     "less",
@@ -427,13 +426,19 @@ def tag_frequency_baseline(
 
 
 def known_word_bonus(word: str, tag: str, params: HMMParameters) -> float:
+    # TEST: Re-enable known word bonus
     bonus = 0.0
     lower = word.lower()
-
-    # Removed numeric bonus - had zero impact
-    # Removed symbol bonus - had zero impact
-
-    # Keep capitalization bonuses (small positive impact)
+    if is_numeric_token(word):
+        if tag == "CD":
+            bonus += math.log(1.6)
+        elif tag not in {"LS", "JJ"}:
+            bonus += math.log(0.4)
+    if is_symbol_token(word):
+        if tag in PUNCT_TAGS:
+            bonus += math.log(1.6)
+        else:
+            bonus += math.log(0.3)
     if word[:1].isupper() and not word.isupper():
         if tag in CAPITAL_TAGS:
             bonus += math.log(1.2)
@@ -444,15 +449,11 @@ def known_word_bonus(word: str, tag: str, params: HMMParameters) -> float:
             bonus += math.log(1.15)
         elif tag == "JJ":
             bonus += math.log(0.8)
-
-    # Keep -ly bonus (small positive impact)
     if lower.endswith("ly"):
         if tag == "RB":
             bonus += math.log(1.25)
         elif tag in {"NN", "JJ", "VB"}:
             bonus += math.log(0.7)
-
-    # Keep adjective/noun bonuses (small positive impact)
     if tag == "JJ":
         if is_adjective_like(word):
             bonus += math.log(1.15)
@@ -462,8 +463,6 @@ def known_word_bonus(word: str, tag: str, params: HMMParameters) -> float:
         bonus += math.log(1.1)
     if tag == "NNPS" and word[:1].isupper() and word.endswith("s"):
         bonus += math.log(1.2)
-
-    # Keep frequency bonus (small positive impact)
     counts = params.word_tag_counts.get(word)
     if counts:
         total = sum(counts.values())
@@ -471,10 +470,10 @@ def known_word_bonus(word: str, tag: str, params: HMMParameters) -> float:
             best_tag, best_count = counts.most_common(1)[0]
             best_freq = best_count / total
             freq = counts.get(tag, 0) / total
-            if tag == best_tag and best_freq >= 0.50:
-                bonus += math.log(1.0 + 1.2 * max(0.0, best_freq - 0.50))
-            elif tag != best_tag and freq <= 0.10:
-                bonus += math.log(0.75)
+            if tag == best_tag and best_freq >= 0.50:  # Lowered threshold slightly
+                bonus += math.log(1.0 + 1.2 * max(0.0, best_freq - 0.50))  # Stronger bonus
+            elif tag != best_tag and freq <= 0.10:  # Slightly higher threshold
+                bonus += math.log(0.75)  # Stronger penalty
     return bonus
 
 
@@ -513,24 +512,10 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str, idx: int, wor
 
                 # If lowercase version is commonly a non-proper noun tag
                 if most_common_tag not in CAPITAL_TAGS and tag_freq > 0.6:
-                    if curr == most_common_tag:
+                    if curr in CAPITAL_TAGS:  # NNP, NNPS
+                        bonus += math.log(0.3)  # Strong penalty for treating as proper noun
+                    elif curr == most_common_tag:
                         bonus += math.log(1.4)  # Boost the expected tag
-                    elif curr in CAPITAL_TAGS:  # NNP, NNPS
-                        # Check if it ends with 's' for potential NNPS
-                        if word.endswith("s") and curr == "NNPS":
-                            bonus += math.log(0.5)  # Less penalty for NNPS
-                        else:
-                            bonus += math.log(0.3)  # Strong penalty for NNP
-        else:
-            # Unknown word at sentence start - could be proper noun
-            if word.endswith("s"):
-                if curr == "NNPS":
-                    bonus += math.log(1.2)  # Likely plural proper noun
-                elif curr == "NNP":
-                    bonus += math.log(0.8)  # Less likely singular
-            else:
-                if curr == "NNP":
-                    bonus += math.log(1.1)  # Likely singular proper noun
 
     # Handle NNPS vs NNP - pluralized proper nouns
     if word.endswith("s") and word[0].isupper() and len(word) > 2:
@@ -553,29 +538,12 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str, idx: int, wor
         elif curr == "JJ" and not is_adjective_like(word):
             bonus += math.log(0.7)  # Penalty for non-adjective words as JJ
 
-    # Fix for VBD/VBN confusion:
+    # Fix for VBD/VBN confusion: 
     if lower.endswith("ed") and prev in {"NN", "NNS", "PRP"}:
         if curr == "VBD":
             bonus += math.log(1.3)  # After subjects, -ed words are usually past tense VBD
         elif curr == "VBN":
             bonus += math.log(0.7)  # Penalty for past participle after subjects
-
-    # Fix 1: Sentence-initial common nouns shouldn't be NNP
-    # If word is capitalized at sentence start and exists as lowercase common noun
-    if idx == 0 and word[0].isupper() and lower in params.vocabulary:
-        lower_tags = params.word_tag_counts.get(lower, Counter())
-        if lower_tags:
-            # Check if lowercase version is primarily a common noun/verb
-            total = sum(lower_tags.values())
-            common_tags = {"NN", "NNS", "VB", "VBZ", "VBP", "VBD", "VBG", "VBN", "JJ"}
-            common_freq = sum(lower_tags.get(t, 0) for t in common_tags) / total if total > 0 else 0
-
-            # If lowercase is usually NOT a proper noun
-            if common_freq > 0.7:  # 70% of the time it's a common word
-                if curr in {"NNP", "NNPS"}:
-                    bonus += math.log(0.4)  # Penalty for proper noun
-                elif curr in lower_tags and lower_tags[curr] > 0:
-                    bonus += math.log(1.3)  # Boost the expected common tag
 
     return bonus
 
@@ -601,9 +569,8 @@ def viterbi_tag(
     tag_priors = params.tag_priors
     default_tag = params.default_tag
     neg_inf = float("-inf")
-    bigram_totals = params.bigram_totals
 
-    def oov_log_prob(oov_class: str | None, tag: str, prev_tag_for_ctx: str) -> float:
+    def oov_log_prob(oov_class: str | None, tag: str) -> float:
         global_prob = global_hapax.get(tag, 0.0)
         if oov_class and oov_class in hapax_class_probs:
             class_probs = hapax_class_probs[oov_class]
@@ -613,13 +580,6 @@ def viterbi_tag(
             prob = mix * class_prob + (1.0 - mix) * global_prob
         else:
             prob = global_prob
-        # Light context interpolation for OOV only: blend with P(tag | prev)
-        if prev_tag_for_ctx in transition_probs:
-            ctx_prob = transition_probs.get(prev_tag_for_ctx, {}).get(tag, tag_priors.get(tag, 0.0))
-            prev_total = bigram_totals.get(prev_tag_for_ctx, 0)
-            ctx_mix_scale = prev_total / (prev_total + OOV_CONTEXT_BACKOFF) if OOV_CONTEXT_BACKOFF > 0 else 1.0
-            gamma = OOV_CONTEXT_MIX * ctx_mix_scale
-            prob = (1.0 - gamma) * prob + gamma * ctx_prob
         if oov_class:
             if "NUMERIC" in oov_class:
                 if tag == "CD":
@@ -674,7 +634,7 @@ def viterbi_tag(
                     emit_score = blend_low_freq_emission(first_word, curr, emit_score, params)
                     emit_score += known_word_bonus(first_word, curr, params)
             else:
-                emit_score = oov_log_prob(first_class, curr, START_TAG)
+                emit_score = oov_log_prob(first_class, curr)
             if trans_score == neg_inf or emit_score == neg_inf:
                 continue
             bonus = context_bonus(START_TAG, START_TAG, curr, first_word, 0, words, params)
@@ -707,7 +667,7 @@ def viterbi_tag(
                             emit_score = blend_low_freq_emission(word, curr, emit_score, params)
                             emit_score += known_word_bonus(word, curr, params)
                     else:
-                        emit_score = oov_log_prob(word_class, curr, prev)
+                        emit_score = oov_log_prob(word_class, curr)
                     if emit_score == neg_inf:
                         continue
                     trans_score = transition_log(prev_prev, prev, curr)
@@ -738,7 +698,7 @@ def viterbi_tag(
                         emit_score = blend_low_freq_emission(word, freq_tag, emit_score, params)
                         emit_score += known_word_bonus(word, freq_tag, params)
                 else:
-                    emit_score = oov_log_prob(word_class, freq_tag, prev_state)
+                    emit_score = oov_log_prob(word_class, freq_tag)
                 if trans_score == neg_inf or emit_score == neg_inf:
                     total = best_prev_score
                 else:
