@@ -1543,8 +1543,8 @@ City	NNP
 Thames	NNP
 has	VBZ
 spent	VBN
-about	IN
-as	RB
+about	RB
+as	IN
 much	JJ
 as	IN
 Shane	NNP
@@ -7195,7 +7195,7 @@ is	VBZ
 not	RB
 .	.
 
-Compelled	NNP
+Compelled	JJ
 service	NN
 is	VBZ
 unconstitutional	JJ
@@ -7307,7 +7307,7 @@ cheap	JJ
 
 Enthusiasts	NNS
 assume	VBP
-that	DT
+that	IN
 national	JJ
 service	NN
 would	MD
@@ -16894,7 +16894,7 @@ lift	NN
 for	IN
 junk	NN
 bonds	NNS
-as	RB
+as	IN
 well	RB
 as	IN
 other	JJ
@@ -17003,7 +17003,7 @@ case	NN
 but	CC
 I	PRP
 believe	VBP
-that	WDT
+that	IN
 people	NNS
 are	VBP
 running	VBG
@@ -27246,7 +27246,7 @@ dollar	NN
 terms	NNS
 .	.
 
-Today	NNP
+Today	NN
 ,	,
 metropolitan	JJ
 Houston	NNP
@@ -28802,7 +28802,7 @@ conduct	VB
 an	DT
 investigation	NN
 ,	,
-as	RB
+as	IN
 was	VBD
 done	VBN
 in	IN
@@ -33782,7 +33782,7 @@ imprisonment	NN
 of	IN
 Mr.	NNP
 Mandela	NNP
-as	RB
+as	IN
 well	RB
 as	IN
 the	DT

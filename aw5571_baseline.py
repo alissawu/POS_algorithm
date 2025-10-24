@@ -513,28 +513,25 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str,
         elif curr == "VBN":
             bonus += math.log(0.95)
 
-    # PENN RULE: RP vs IN - particles can't take PP complements (strengthened)
-    # Penn guideline §4.1: "out of", "up from" → always IN, never RP
-    # Particles are verb modifiers, prepositions head PPs
-    # Dev analysis: 15 RP→IN errors before "of"/"from", ~100% precision
+    # RP vs IN: lookahead for fixed PP heads; keep light
     if idx + 1 < len(words):
         nxt = words[idx + 1].lower()
         if nxt in {"of", "from", "until", "to"}:
             if curr == "IN":
-                bonus += math.log(1.6)  # Stronger boost (was 1.25)
+                bonus += math.log(1.25)
             elif curr == "RP":
-                bonus += math.log(0.5)  # Stronger penalty (was 0.85)
+                bonus += math.log(0.85)
 
-    # PENN RULE: Perfect auxiliaries REQUIRE VBN (further strengthened)
+    # PENN RULE: Perfect auxiliaries REQUIRE VBN (strengthened)
     # Penn guideline §4.1: "has/have/had/been/being" + participle → MUST be VBN
     # This is a grammatical requirement per Manning Section 5.1
-    # Dev analysis: 8 violations still remain, strengthen further
+    # Dev analysis: 5 violations found
     if idx > 0 and words[idx - 1].lower() in {"has", "have", "had", "been", "being"}:
         if lower.endswith(("ed", "en")):
             if curr == "VBN":
-                bonus += math.log(2.0)  # Further strengthened (was 1.6)
+                bonus += math.log(1.6)  # Stronger boost (was 1.25)
             elif curr == "VBD":
-                bonus += math.log(0.4)  # Stronger penalty (was 0.6)
+                bonus += math.log(0.6)  # Stronger penalty (was 0.9)
 
     # 'to' context: if next looks like base verb (seen as VB often), gently help TO
     if lower == "to" and idx + 1 < len(words):
@@ -565,15 +562,6 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str,
                     bonus += math.log(1.4)
                 elif curr in {"DT", "WDT"}:
                     bonus += math.log(0.7)
-
-    # PENN RULE: "ago" is ALWAYS temporal IN
-    # Penn guideline §4.1: "3 weeks ago" = temporal preposition
-    # Dev analysis: 13 RB→IN errors, 100% precision, no exceptions
-    if lower == "ago":
-        if curr == "IN":
-            bonus += math.log(2.0)  # Strong boost - no exceptions
-        elif curr in {"RB", "RP"}:
-            bonus += math.log(0.4)  # Strong penalty
 
     return clamp_log(bonus)
 
@@ -860,6 +848,7 @@ def run_viterbi(train_path: Path, test_path: Path, output_path: Path,
     CLASS_BACKOFF = class_backoff
     TRANSITION_ALPHA = transition_alpha
     EMISSION_ALPHA = emission_alpha
+    print("alphas in effect:", TRANSITION_ALPHA, EMISSION_ALPHA, CLASS_ALPHA, CLASS_BACKOFF)
     tagged_sentences = read_tagged_corpus(train_path)
     word_sequences = read_word_sequences(test_path)
     params = train_hmm_parameters(tagged_sentences)

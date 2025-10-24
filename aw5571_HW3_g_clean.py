@@ -11,7 +11,6 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
-
 # -----------------------------
 # Types & constants
 # -----------------------------
@@ -490,15 +489,6 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str,
     bonus = 0.0
     lower = word.lower()
 
-    # mild penalty to curb over-NNP
-    if idx == 0 and word[:1].isupper() and not word.isupper():
-        if curr in {"NNP","NNPS"} and not any(ch.isdigit() for ch in word):
-            bonus += math.log(0.90)
-    #as/than = IN
-    if word.lower() in {"as", "than"}:
-        if curr == "IN": bonus += math.log(1.20)
-        elif curr in {"RB","JJ"}: bonus += math.log(0.90)
-
     # After determiners, NN is slightly favored; non-adj JJ penalized a bit
     if prev in DETERMINER_TAGS:
         if curr == "NN":
@@ -513,28 +503,22 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str,
         elif curr == "VBN":
             bonus += math.log(0.95)
 
-    # PENN RULE: RP vs IN - particles can't take PP complements (strengthened)
-    # Penn guideline §4.1: "out of", "up from" → always IN, never RP
-    # Particles are verb modifiers, prepositions head PPs
-    # Dev analysis: 15 RP→IN errors before "of"/"from", ~100% precision
+    # RP vs IN: lookahead for fixed PP heads; keep light
     if idx + 1 < len(words):
         nxt = words[idx + 1].lower()
         if nxt in {"of", "from", "until", "to"}:
             if curr == "IN":
-                bonus += math.log(1.6)  # Stronger boost (was 1.25)
+                bonus += math.log(1.25)
             elif curr == "RP":
-                bonus += math.log(0.5)  # Stronger penalty (was 0.85)
+                bonus += math.log(0.85)
 
-    # PENN RULE: Perfect auxiliaries REQUIRE VBN (further strengthened)
-    # Penn guideline §4.1: "has/have/had/been/being" + participle → MUST be VBN
-    # This is a grammatical requirement per Manning Section 5.1
-    # Dev analysis: 8 violations still remain, strengthen further
+    # Perfect auxiliaries prefer VBN (soft)
     if idx > 0 and words[idx - 1].lower() in {"has", "have", "had", "been", "being"}:
         if lower.endswith(("ed", "en")):
             if curr == "VBN":
-                bonus += math.log(2.0)  # Further strengthened (was 1.6)
+                bonus += math.log(1.25)
             elif curr == "VBD":
-                bonus += math.log(0.4)  # Stronger penalty (was 0.6)
+                bonus += math.log(0.9)
 
     # 'to' context: if next looks like base verb (seen as VB often), gently help TO
     if lower == "to" and idx + 1 < len(words):
@@ -550,30 +534,6 @@ def context_bonus(prev_prev: str, prev: str, curr: str, word: str,
         nxt = words[idx + 1].lower()
         if nxt in {"is", "are", "was", "were", "'s", "'re"} and curr == "EX":
             bonus += math.log(1.2)
-
-    # PENN RULE: "that" after verbs → complementizer IN
-    # Manning Section 5.3: Fixed 285+ errors in Penn Treebank
-    # "I think that..." → that/IN (not DT/WDT)
-    if lower in {"that", "because", "while", "though"}:
-        if idx > 0:
-            prev_word_lower = words[idx - 1].lower()
-            # Complementizer after reporting/cognitive verbs
-            if prev_word_lower in {"think", "said", "say", "believe", "know", "feel", "hope",
-                                   "suggest", "argue", "claim", "expect", "fear", "thought",
-                                   "told", "assume", "suppose", "suspect"}:
-                if curr == "IN":
-                    bonus += math.log(1.4)
-                elif curr in {"DT", "WDT"}:
-                    bonus += math.log(0.7)
-
-    # PENN RULE: "ago" is ALWAYS temporal IN
-    # Penn guideline §4.1: "3 weeks ago" = temporal preposition
-    # Dev analysis: 13 RB→IN errors, 100% precision, no exceptions
-    if lower == "ago":
-        if curr == "IN":
-            bonus += math.log(2.0)  # Strong boost - no exceptions
-        elif curr in {"RB", "RP"}:
-            bonus += math.log(0.4)  # Strong penalty
 
     return clamp_log(bonus)
 
@@ -878,7 +838,6 @@ def main() -> None:
             class_backoff=args.class_backoff,
             transition_alpha=args.transition_alpha,
             emission_alpha=args.emission_alpha,
-            
         )
 
 
